@@ -33,9 +33,12 @@ MAX_COL_WIDTH = 80
 MIN_COL_WIDTH = 12
 
 
-def write_xlsx(posts: list[StoredPost], path: str | Path) -> Path:
-    """Write ``posts`` to an .xlsx file at ``path`` and return the path."""
-    path = Path(path)
+def build_workbook(posts: list[StoredPost]) -> Workbook:
+    """Build the formatted workbook in memory (no filesystem).
+
+    Used directly by the serverless web function, which streams the workbook to
+    the client rather than writing it to disk.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "LinkedIn Posts"
@@ -60,8 +63,13 @@ def write_xlsx(posts: list[StoredPost], path: str | Path) -> Path:
 
     # Freeze the header row: everything from A2 down scrolls under a fixed row 1.
     ws.freeze_panes = "A2"
+    return wb
 
-    wb.save(path)
+
+def write_xlsx(posts: list[StoredPost], path: str | Path) -> Path:
+    """Write ``posts`` to an .xlsx file at ``path`` and return the path."""
+    path = Path(path)
+    build_workbook(posts).save(path)
     return path
 
 

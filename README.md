@@ -26,9 +26,10 @@ hand.** The tool then runs your search and reads the results off the page.
   method knowingly. Use a low `max_results`, don't run it in a tight loop, and
   understand the account risk is yours.
 
-If ToS-compliance matters more than live search, the safer alternative is to
-save the search-results page as HTML from your own browser and parse that
-offline — ask and this can be adapted to that.
+If ToS-compliance matters more than live automation, use the
+[public web page](#public-web-page-vercel) instead: you save the search-results
+page from your own browser and it only parses that file, never touching
+LinkedIn itself.
 
 ---
 
@@ -37,9 +38,13 @@ offline — ask and this can be adapted to that.
 Requires Python 3.11+.
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 playwright install chromium
 ```
+
+(`requirements-local.txt` adds Playwright on top of `requirements.txt`.
+`requirements.txt` alone is the smaller set the hosted web page needs, and is
+what Vercel installs.)
 
 (`playwright install chromium` downloads the browser Playwright drives. You
 only need to do it once.)
@@ -88,6 +93,44 @@ The web page runs only on your own machine (`127.0.0.1`); it is a convenience
 front end, not a hosted service, and it does not change the LinkedIn login or
 Terms-of-Service realities described above.
 
+## Public web page (Vercel)
+
+There is also a **public** version of the page, deployable to Vercel, at
+`api/index.py`. It works differently from the local tool, for a reason worth
+understanding:
+
+A public server has no browser for you to log into and no LinkedIn session of
+its own. The only way it could scrape live results would be to store LinkedIn
+credentials on the server, which violates LinkedIn's Terms of Service. So the
+public page splits the work: **you** do the LinkedIn part in your own browser,
+and the server only processes what you hand it.
+
+How your teammate uses it:
+
+1. Log in to LinkedIn in their own browser and run the search under **Posts**.
+2. Scroll until enough posts are loaded.
+3. Save the page with `Ctrl/Cmd + S`, choosing **Webpage, HTML Only**
+   (not "Complete" -- HTML Only is much smaller).
+4. On the public page: type the search term, upload that `.html` file, click
+   **Collect posts & download Excel**.
+
+The server parses the file, de-duplicates by post URL, and streams back the
+same formatted `.xlsx` (frozen bold header, auto-sized columns, clickable
+links). It **stores nothing** -- no credentials, no database, no uploaded
+files; the workbook is built in memory. That also means the public page has no
+incremental history: each upload produces a standalone spreadsheet. The local
+tool is the one that keeps a growing datastore.
+
+### Deploying
+
+`vercel.json` routes all traffic to the single Python function and Vercel
+installs `requirements.txt`. Connect the repo in Vercel and it deploys on push;
+no environment variables or secrets are needed.
+
+Note on limits: hosted request bodies are capped (a few MB on Vercel's free
+tier). Saving as **HTML Only** keeps files well under that in normal use, but a
+very long scrolled page can exceed it -- use the local tool for large runs.
+
 ## How re-running works
 
 - The **source of truth** is the local SQLite datastore (`linkedin_posts.db`).
@@ -115,6 +158,8 @@ Edit `config.json`:
 ```
 run.py                     One-command terminal entry point.
 web.py                     Local web-page entry point.
+api/index.py               Public web page (Vercel serverless function).
+vercel.json                Vercel routing/build config.
 config.json                Settings.
 linkedin_posts/
   cli.py                   Orchestrates a run: collect -> parse -> store -> excel.
@@ -126,7 +171,8 @@ linkedin_posts/
   config.py                Loads config.json.
 tests/
   test_pipeline.py         Parse, store, excel, and full pipeline (on a fixture).
-  test_webapp.py           Web routes (on a fixture; no browser).
+  test_webapp.py           Local web routes (on a fixture; no browser).
+  test_public_api.py       Public upload interface (on a fixture).
   fixtures/sample_search.html
 ```
 
