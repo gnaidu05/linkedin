@@ -114,12 +114,22 @@ How your teammate uses it:
 4. On the public page: type the search term, upload that `.html` file, click
    **Collect posts & download Excel**.
 
-The server parses the file, de-duplicates by post URL, and streams back the
-same formatted `.xlsx` (frozen bold header, auto-sized columns, clickable
-links). It **stores nothing** -- no credentials, no database, no uploaded
-files; the workbook is built in memory. That also means the public page has no
-incremental history: each upload produces a standalone spreadsheet. The local
-tool is the one that keeps a growing datastore.
+The page reads your file **in your browser**, extracts the posts, and sends
+only those rows to the server, which returns the same formatted `.xlsx`
+(frozen bold header, auto-sized columns, clickable links) with duplicates
+removed by post URL.
+
+That split matters: hosted functions cap request bodies (4.5 MB on Vercel) and
+a real saved LinkedIn page is much bigger than that -- mostly inline scripts
+and JSON that get discarded anyway. Uploading the whole file returns
+`413 FUNCTION_PAYLOAD_TOO_LARGE`. Extracting first turns a multi-megabyte page
+into a few KB of JSON, so page size stops mattering. (A no-JavaScript fallback
+still posts the raw HTML to the server, but it is subject to that size limit.)
+
+The site **stores nothing** -- no credentials, no database, no uploaded files;
+the workbook is built in memory. That also means it keeps no incremental
+history: each run produces a standalone spreadsheet. The local tool is the one
+with a growing datastore.
 
 ### Deploying
 
@@ -127,9 +137,9 @@ tool is the one that keeps a growing datastore.
 installs `requirements.txt`. Connect the repo in Vercel and it deploys on push;
 no environment variables or secrets are needed.
 
-Note on limits: hosted request bodies are capped (a few MB on Vercel's free
-tier). Saving as **HTML Only** keeps files well under that in normal use, but a
-very long scrolled page can exceed it -- use the local tool for large runs.
+If the deployment URL asks you to log in to Vercel, that is Vercel's
+Deployment Protection, not the app: turn it off under
+**Settings -> Deployment Protection -> Vercel Authentication**.
 
 ## How re-running works
 
