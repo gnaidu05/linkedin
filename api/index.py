@@ -44,7 +44,7 @@ MAX_POSTS = 2000
 MAX_TEXT_LEN = 20000
 MAX_FIELD_LEN = 500
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -135,88 +135,244 @@ PAGE = """<!doctype html>
     <div class="msg" id="msg"></div>
   </form>
 
+  <details id="diagwrap" style="display:none;margin-top:1rem">
+    <summary style="cursor:pointer;font-weight:600">What the page saw</summary>
+    <p class="hint">If the result looks wrong, copy this and send it along &mdash;
+       it says what was actually in your file.</p>
+    <pre id="diag" style="overflow-x:auto;background:#f4f6f8;border:1px solid #dfe3e8;
+         border-radius:6px;padding:.8rem;font-size:.8rem;white-space:pre-wrap"></pre>
+  </details>
+
 <script>
 /* Extraction runs here, in the browser, so a multi-megabyte saved page never
-   crosses the network. Keep these selectors in sync with linkedin_posts/parse.py,
-   which does the same job server-side for the no-JavaScript fallback. */
-const CONTAINERS = [
+   crosses the network.
+
+   LinkedIn's class names change and are partly obfuscated, so this does not
+   rely on them. It finds posts by their activity URN -- which appears in data
+   attributes, permalink hrefs and inline JSON -- then walks up to the
+   surrounding card and infers the fields structurally: the author from a
+   profile/company link, the date from a <time> or a relative-time string, the
+   post body from the largest text block. Known class names are still tried
+   first when they happen to be present. */
+
+const KNOWN_CONTAINERS = [
   "div.feed-shared-update-v2",
   "div.update-components-update-v2",
   "li.reusable-search__result-container",
 ];
-const AUTHORS = [
+const KNOWN_AUTHORS = [
   "span.update-components-actor__title span[aria-hidden='true']",
   "span.update-components-actor__title span.visually-hidden",
   "span.update-components-actor__title",
   "span.update-components-actor__name",
 ];
-const DATES = [
+const KNOWN_DATES = [
   "span.update-components-actor__sub-description span[aria-hidden='true']",
   "span.update-components-actor__sub-description",
   "time",
 ];
-const TEXTS = [
+const KNOWN_TEXTS = [
   "div.update-components-text",
   "div.feed-shared-update-v2__description",
   "span.break-words",
 ];
 
+const URN_RE = /urn:li:activity:\d+/;
+const URN_RE_ALL = /urn:li:activity:\d+/g;
+const RELATIVE_TIME =
+  /^(now|\d+\s*(s|m|h|d|w|mo|y)|\d+\s*(second|minute|hour|day|week|month|year)s?(\s+ago)?)$/i;
+
 function clean(s) {
-  return (s || "").replace(/\s+/g, " ").trim()
-                  .replace(/^[•·\s]+/, "")
-                  .replace(/[•·\s]+$/, "").trim();
+  return (s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim()
+                  .replace(/^[•·|\s]+/, "").replace(/[•·|\s]+$/, "").trim();
 }
 function firstText(el, sels) {
   for (const s of sels) {
-    const n = el.querySelector(s);
+    let n = null;
+    try { n = el.querySelector(s); } catch (_) {}
     if (n) { const t = clean(n.textContent); if (t) return t; }
   }
   return "";
 }
-function extractUrl(el) {
-  const nodes = [el, ...el.querySelectorAll("[data-urn]")];
-  for (const n of nodes) {
-    const u = n.getAttribute && n.getAttribute("data-urn");
-    if (u && u.indexOf("activity") !== -1) {
-      return "https://www.linkedin.com/feed/update/" + u + "/";
-    }
+function permalink(urn) {
+  return "https://www.linkedin.com/feed/update/" + urn + "/";
+}
+
+/* Grow the card outward from the node carrying the URN, stopping before an
+   ancestor that would take in a second post. That boundary -- one post per
+   card -- is what keeps neighbouring posts from bleeding into each other. */
+function containsAtLeastTwo(ancestor, bearers) {
+  let n = 0;
+  for (const b of bearers) {
+    if (ancestor === b.el || ancestor.contains(b.el)) { n++; if (n > 1) return true; }
   }
-  for (const a of el.querySelectorAll("a[href]")) {
-    let h = a.getAttribute("href") || "";
-    if (h.indexOf("/feed/update/") !== -1 || h.indexOf("/posts/") !== -1) {
-      if (h.charAt(0) === "/") h = "https://www.linkedin.com" + h;
-      return h.split("?")[0];
-    }
+  return false;
+}
+function climbToCard(el, bearers) {
+  let best = el;
+  let cur = el;
+  for (let i = 0; i < 12 && cur.parentElement; i++) {
+    const parent = cur.parentElement;
+    if (!parent.tagName || parent.tagName === "BODY" || parent.tagName === "HTML") break;
+    if (containsAtLeastTwo(parent, bearers)) break;
+    cur = parent;
+    best = parent;
+  }
+  return best;
+}
+
+function findAuthor(card) {
+  const known = firstText(card, KNOWN_AUTHORS);
+  if (known) return known;
+  /* A profile or company link's text is the most reliable author signal. */
+  let nodes = [];
+  try {
+    nodes = card.querySelectorAll('a[href*="/in/"], a[href*="/company/"], a[href*="/school/"]');
+  } catch (_) {}
+  for (const a of nodes) {
+    const t = clean(a.textContent);
+    if (t && t.length <= 120 && !/^\d+$/.test(t)) return t;
+  }
+  /* Otherwise the first short line of the card often is the name. */
+  const first = clean((card.textContent || "").split("\n")[0]).slice(0, 120);
+  return first.length <= 120 ? first : "";
+}
+
+function findDate(card) {
+  const t0 = card.querySelector("time");
+  if (t0) {
+    const t = clean(t0.getAttribute("datetime") || t0.textContent);
+    if (t) return t;
+  }
+  const known = firstText(card, KNOWN_DATES);
+  if (known && known.length <= 40) return known;
+  let leaves = [];
+  try { leaves = card.querySelectorAll("span,div,time,p"); } catch (_) {}
+  for (const el of leaves) {
+    if (el.children && el.children.length) continue;
+    const t = clean(el.textContent);
+    if (t && t.length <= 24 && RELATIVE_TIME.test(t)) return t;
   }
   return "";
 }
-function extractPosts(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const seen = new Set(), out = [];
-  for (const sel of CONTAINERS) {
-    for (const el of doc.querySelectorAll(sel)) {
-      if (seen.has(el)) continue;
-      seen.add(el);
-      const url = extractUrl(el);
-      if (!url) continue;
-      out.push({
-        url: url,
-        date_posted: firstText(el, DATES),
-        author: firstText(el, AUTHORS),
-        text: firstText(el, TEXTS),
-      });
+
+function findText(card) {
+  const known = firstText(card, KNOWN_TEXTS);
+  if (known) return known;
+  /* Largest text block that is not the whole card wins. */
+  let best = "";
+  let nodes = [];
+  try { nodes = card.querySelectorAll("div,span,p"); } catch (_) {}
+  for (const el of nodes) {
+    const t = clean(el.textContent);
+    if (t.length > best.length && t.length < (card.textContent || "").length) best = t;
+  }
+  if (!best) best = clean(card.textContent);
+  return best;
+}
+
+/* Map post URL -> a DOM node that mentions it. */
+function urnNodes(doc) {
+  const map = new Map();
+  const remember = function (urn, el) {
+    const url = permalink(urn);
+    if (!map.has(url)) map.set(url, el);
+  };
+  let all = [];
+  try { all = doc.querySelectorAll("*"); } catch (_) {}
+  for (const el of all) {
+    if (!el.attributes) continue;
+    for (const attr of el.attributes) {
+      const m = URN_RE.exec(attr.value || "");
+      if (m) { remember(m[0], el); break; }
     }
   }
+  return map;
+}
+
+function extractPosts(html, doc) {
+  const out = [];
+  const seen = new Set();
+
+  /* 1. Known containers first, when the markup is the familiar shape. */
+  for (const sel of KNOWN_CONTAINERS) {
+    let els = [];
+    try { els = doc.querySelectorAll(sel); } catch (_) {}
+    for (const el of els) {
+      const m = URN_RE.exec(el.outerHTML || "");
+      if (!m) continue;
+      const url = permalink(m[0]);
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push({ url: url, date_posted: findDate(el), author: findAuthor(el), text: findText(el) });
+    }
+  }
+
+  /* 2. URN-anywhere: works regardless of class names. */
+  const found = urnNodes(doc);
+  const bearers = [];
+  for (const [u, el] of found) bearers.push({ url: u, el: el });
+  for (const b of bearers) {
+    if (seen.has(b.url)) continue;
+    seen.add(b.url);
+    const card = climbToCard(b.el, bearers);
+    out.push({
+      url: b.url,
+      date_posted: findDate(card),
+      author: findAuthor(card),
+      text: findText(card),
+    });
+  }
+
+  /* 3. URNs present only in inline JSON: emit link-only rows so nothing is
+        silently lost. */
+  const inRaw = html.match(URN_RE_ALL) || [];
+  for (const urn of inRaw) {
+    const url = permalink(urn);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push({ url: url, date_posted: "", author: "", text: "" });
+  }
   return out;
+}
+
+function diagnose(html, doc) {
+  const urns = new Set(html.match(URN_RE_ALL) || []);
+  const lines = [];
+  lines.push("file size: " + (html.length / 1048576).toFixed(2) + " MB");
+  lines.push("activity URNs in file: " + urns.size);
+  for (const sel of KNOWN_CONTAINERS) {
+    let n = 0;
+    try { n = doc.querySelectorAll(sel).length; } catch (_) {}
+    lines.push("matches " + sel + ": " + n);
+  }
+  let permalinks = 0;
+  try {
+    permalinks = doc.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]').length;
+  } catch (_) {}
+  lines.push("permalink anchors: " + permalinks);
+  const freq = {};
+  let classed = [];
+  try { classed = doc.querySelectorAll("div[class],li[class],article[class],section[class]"); } catch (_) {}
+  for (const el of classed) {
+    for (const c of el.classList) freq[c] = (freq[c] || 0) + 1;
+  }
+  const top = Object.keys(freq).sort(function (a, b) { return freq[b] - freq[a]; }).slice(0, 15);
+  lines.push("most common class names:");
+  for (const c of top) lines.push("  " + c + " x" + freq[c]);
+  return lines.join("\n");
 }
 
 const form = document.getElementById("form");
 const msg = document.getElementById("msg");
 const go = document.getElementById("go");
+const diagWrap = document.getElementById("diagwrap");
+const diagPre = document.getElementById("diag");
 function show(kind, text) { msg.className = "msg " + kind; msg.textContent = text; }
 
 form.addEventListener("submit", async function (e) {
   e.preventDefault();
+  diagWrap.style.display = "none";
   const term = document.getElementById("term").value.trim();
   if (!term) { show("error", "Please enter a search term."); return; }
 
@@ -234,10 +390,17 @@ form.addEventListener("submit", async function (e) {
     }
 
     show("busy", "Finding posts in the page…");
-    const posts = extractPosts(html);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const posts = extractPosts(html, doc);
+
+    /* Always make the diagnostics available -- it is what turns "not working"
+       into something fixable. */
+    diagPre.textContent = diagnose(html, doc) + "\nposts extracted: " + posts.length;
+    diagWrap.style.display = "block";
+
     if (!posts.length) {
-      show("error", "No posts found in that page. Make sure you saved the " +
-                    "LinkedIn search results (the Posts tab) while logged in.");
+      show("error", "No posts found in that page. Open “What the page saw” " +
+                    "below and send it along so the extractor can be adjusted.");
       return;
     }
 
@@ -263,10 +426,12 @@ form.addEventListener("submit", async function (e) {
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
-    const unique = new Set(posts.map(function (p) { return p.url; })).size;
-    const dupes = posts.length - unique;
-    show("ok", "Done — " + unique + " post(s) in " + name +
-               (dupes ? " (" + dupes + " duplicate(s) skipped)" : "") + ".");
+    const withText = posts.filter(function (p) { return p.text; }).length;
+    show("ok", "Done — " + posts.length + " post(s) in " + name +
+               (withText < posts.length
+                 ? ". " + (posts.length - withText) + " had only a link; open " +
+                   "“What the page saw” if that looks wrong."
+                 : "."));
   } catch (err) {
     show("error", "Could not process that file: " + err.message);
   } finally {
