@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Search results</title></head>
+<body>
+<div class="search-results-container">
+
+  <!-- Post 1 -->
+  <div class="feed-shared-update-v2" data-urn="urn:li:activity:7200000000000000001">
+    <div class="update-components-actor">
+      <span class="update-components-actor__title">
+        <span aria-hidden="true">Ada Lovelace</span>
+        <span class="visually-hidden">Ada Lovelace</span>
+      </span>
+      <span class="update-components-actor__sub-description">
+        <span aria-hidden="true">2d •</span>
+      </span>
+    </div>
+    <div class="update-components-text">
+      Thrilled to share our team just shipped a new analytics engine.
+      #dataengineering
+    </div>
+  </div>
+
+  <!-- Post 2 -->
+  <div class="feed-shared-update-v2" data-urn="urn:li:activity:7200000000000000002">
+    <div class="update-components-actor">
+      <span class="update-components-actor__title">
+        <span aria-hidden="true">Grace Hopper</span>
+      </span>
+      <span class="update-components-actor__sub-description">
+        <span aria-hidden="true">1w •</span>
+      </span>
+    </div>
+    <div class="update-components-text">
+      Hiring data engineers. Remote-friendly. DM me if interested!
+    </div>
+  </div>
+
+  <!-- Post 3 -->
+  <div class="feed-shared-update-v2" data-urn="urn:li:activity:7200000000000000003">
+    <div class="update-components-actor">
+      <span class="update-components-actor__title">
+        <span aria-hidden="true">Alan Turing</span>
+      </span>
+      <span class="update-components-actor__sub-description">
+        <span aria-hidden="true">3h •</span>
+      </span>
+    </div>
+    <div class="update-components-text">
+      A short thread on why data pipelines fail in production. 1/ Backpressure...
+    </div>
+  </div>
+
+  <!-- Post 4: duplicate of Post 1 (same activity URN) -> should de-dupe -->
+  <div class="feed-shared-update-v2" data-urn="urn:li:activity:7200000000000000001">
+    <div class="update-components-actor">
+      <span class="update-components-actor__title">
+        <span aria-hidden="true">Ada Lovelace</span>
+      </span>
+      <span class="update-components-actor__sub-description">
+        <span aria-hidden="true">2d •</span>
+      </span>
+    </div>
+    <div class="update-components-text">
+      Thrilled to share our team just shipped a new analytics engine.
+      #dataengineering
+    </div>
+  </div>
+
+  <!-- Post 5: no URN and no post link -> should be skipped -->
+  <div class="feed-shared-update-v2">
+    <div class="update-components-actor">
+      <span class="update-components-actor__title">
+        <span aria-hidden="true">Anonymous Promo</span>
+      </span>
+    </div>
+    <div class="update-components-text">This one has no linkable identity.</div>
+  </div>
+
+</div>
+</body>
+</html>
