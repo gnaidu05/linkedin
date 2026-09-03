@@ -1,19 +1,24 @@
 """Public web interface, deployable to Vercel as a serverless function.
 
-Flow: the visitor types a search term, uploads (or pastes) the HTML of a
-LinkedIn search-results page they saved from their own logged-in browser, and
-gets back a formatted .xlsx.
+Flow: the visitor types a search term and points the page at a LinkedIn
+search-results page they saved from their own logged-in browser. The page
+extracts the posts *in the browser* and sends only the extracted rows to the
+server, which returns a formatted .xlsx.
 
-Why it works this way: a public server has no browser for a human to log into
-and no LinkedIn session of its own. The only way it could scrape live results
-would be to hold LinkedIn credentials, which violates LinkedIn's Terms of
-Service. So the human does the LinkedIn part in their own browser and the
-server only parses what they hand it -- no credentials, no automation against
-LinkedIn.
+Why extraction happens in the browser: hosted functions cap request bodies
+(4.5 MB on Vercel), and a saved LinkedIn page is far larger than that -- most
+of its weight is inline scripts and JSON that we discard anyway. Uploading the
+whole file returns 413 FUNCTION_PAYLOAD_TOO_LARGE. Extracting first reduces a
+multi-megabyte page to a few KB of JSON, so page size stops mattering.
+
+Why the human supplies the page at all: a public server has no browser for
+someone to log into and no LinkedIn session of its own. The only way it could
+scrape live results would be to hold LinkedIn credentials, which violates
+LinkedIn's Terms of Service. So the human does the LinkedIn part in their own
+browser and the server only formats what they hand it.
 
 Stateless by design: nothing is written to disk (serverless filesystems are
-ephemeral). The workbook is built in memory and streamed back. De-duplication
-by post URL happens within the submitted HTML.
+ephemeral). The workbook is built in memory and streamed back.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import sys
 from datetime import datetime, timezone
 from io import BytesIO
 
-from flask import Flask, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template_string, request, send_file
 
 # Make the repo root importable so the shared package can be reused.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,9 +37,12 @@ from linkedin_posts.excel import build_workbook  # noqa: E402
 from linkedin_posts.parse import parse_posts  # noqa: E402
 from linkedin_posts.store import StoredPost  # noqa: E402
 
-XLSX_MIME = (
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Bounds on what the JSON endpoint will accept, since it is a public boundary.
+MAX_POSTS = 2000
+MAX_TEXT_LEN = 20000
+MAX_FIELD_LEN = 500
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -56,23 +64,29 @@ PAGE = """<!doctype html>
     input[type=text], textarea, input[type=file] { width: 100%;
       padding: .6rem .7rem; font: inherit; border: 1px solid #999;
       border-radius: 6px; background: canvas; color: canvastext; }
-    textarea { min-height: 120px; font-family: ui-monospace, monospace;
+    textarea { min-height: 110px; font-family: ui-monospace, monospace;
                font-size: .85rem; }
-    .hint { color: #666; font-size: .85rem; font-weight: 400;
-            margin: .35rem 0 0; }
+    .hint { color: #666; font-size: .85rem; font-weight: 400; margin: .35rem 0 0; }
     .or { text-align: center; color: #888; margin: .75rem 0; font-size: .9rem; }
     button { padding: .7rem 1.3rem; font-size: 1rem; font-weight: 600;
              border: 0; border-radius: 6px; background: #0a66c2; color: #fff;
              cursor: pointer; }
     button:hover { background: #084b8f; }
+    button[disabled] { opacity: .6; cursor: progress; }
     .steps { background: #f4f6f8; border: 1px solid #dfe3e8; border-radius: 8px;
              padding: 1rem 1.1rem 1rem 2rem; margin: 0 0 1.5rem; }
     .steps li { margin: .3rem 0; }
     .note { background: #fff8e1; border: 1px solid #ffe082; color: #5f4b00;
             padding: .7rem .9rem; border-radius: 6px; font-size: .9rem;
             margin-bottom: 1.5rem; }
-    .error { background: #fdecea; border: 1px solid #f5c6cb; color: #8a1c1c;
-             padding: .7rem .9rem; border-radius: 6px; margin-bottom: 1rem; }
+    .msg { padding: .7rem .9rem; border-radius: 6px; margin: 1rem 0 0;
+           display: none; }
+    .msg.error { display: block; background: #fdecea; border: 1px solid #f5c6cb;
+                 color: #8a1c1c; }
+    .msg.ok { display: block; background: #e8f5e9; border: 1px solid #a5d6a7;
+              color: #1b5e20; }
+    .msg.busy { display: block; background: #e3f2fd; border: 1px solid #90caf9;
+                color: #0d47a1; }
     code { background: #eceff1; padding: .1rem .3rem; border-radius: 3px;
            font-size: .9em; }
   </style>
@@ -81,23 +95,24 @@ PAGE = """<!doctype html>
   <h1>LinkedIn Posts &rarr; Excel</h1>
   <p class="sub">Turn a saved LinkedIn search-results page into a spreadsheet.</p>
 
-  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
 
   <ol class="steps">
     <li>In your own browser, log in to LinkedIn and run your search under
         <strong>Posts</strong>.</li>
     <li>Scroll until you have as many posts as you want.</li>
     <li>Save the page: <code>Ctrl/Cmd&nbsp;+&nbsp;S</code>, choosing
-        <strong>Webpage, HTML Only</strong> (not "Complete").</li>
-    <li>Upload that <code>.html</code> file below.</li>
+        <strong>Webpage, HTML Only</strong>.</li>
+    <li>Choose that <code>.html</code> file below.</li>
   </ol>
 
   <div class="note">
-    This site never connects to LinkedIn and stores no credentials or data &mdash;
-    it only reads the file you upload and returns a spreadsheet.
+    Your file is read <strong>in your browser</strong> &mdash; only the extracted
+    post rows are sent, so page size doesn't matter. This site never connects to
+    LinkedIn and stores no credentials or data.
   </div>
 
-  <form method="post" action="/generate" enctype="multipart/form-data">
+  <form id="form" method="post" action="/generate" enctype="multipart/form-data">
     <fieldset>
       <legend>Search term</legend>
       <label for="term">What did you search for?</label>
@@ -108,7 +123,7 @@ PAGE = """<!doctype html>
 
     <fieldset>
       <legend>Saved search results</legend>
-      <label for="html_file">Upload the saved HTML file</label>
+      <label for="html_file">Choose the saved HTML file</label>
       <input type="file" id="html_file" name="html_file" accept=".html,.htm,text/html">
       <div class="or">&mdash; or &mdash;</div>
       <label for="html_text">Paste the page source</label>
@@ -116,19 +131,196 @@ PAGE = """<!doctype html>
                 placeholder="Paste the saved page's HTML here instead"></textarea>
     </fieldset>
 
-    <button type="submit">Collect posts &amp; download Excel</button>
+    <button type="submit" id="go">Collect posts &amp; download Excel</button>
+    <div class="msg" id="msg"></div>
   </form>
+
+<script>
+/* Extraction runs here, in the browser, so a multi-megabyte saved page never
+   crosses the network. Keep these selectors in sync with linkedin_posts/parse.py,
+   which does the same job server-side for the no-JavaScript fallback. */
+const CONTAINERS = [
+  "div.feed-shared-update-v2",
+  "div.update-components-update-v2",
+  "li.reusable-search__result-container",
+];
+const AUTHORS = [
+  "span.update-components-actor__title span[aria-hidden='true']",
+  "span.update-components-actor__title span.visually-hidden",
+  "span.update-components-actor__title",
+  "span.update-components-actor__name",
+];
+const DATES = [
+  "span.update-components-actor__sub-description span[aria-hidden='true']",
+  "span.update-components-actor__sub-description",
+  "time",
+];
+const TEXTS = [
+  "div.update-components-text",
+  "div.feed-shared-update-v2__description",
+  "span.break-words",
+];
+
+function clean(s) {
+  return (s || "").replace(/\s+/g, " ").trim()
+                  .replace(/^[•·\s]+/, "")
+                  .replace(/[•·\s]+$/, "").trim();
+}
+function firstText(el, sels) {
+  for (const s of sels) {
+    const n = el.querySelector(s);
+    if (n) { const t = clean(n.textContent); if (t) return t; }
+  }
+  return "";
+}
+function extractUrl(el) {
+  const nodes = [el, ...el.querySelectorAll("[data-urn]")];
+  for (const n of nodes) {
+    const u = n.getAttribute && n.getAttribute("data-urn");
+    if (u && u.indexOf("activity") !== -1) {
+      return "https://www.linkedin.com/feed/update/" + u + "/";
+    }
+  }
+  for (const a of el.querySelectorAll("a[href]")) {
+    let h = a.getAttribute("href") || "";
+    if (h.indexOf("/feed/update/") !== -1 || h.indexOf("/posts/") !== -1) {
+      if (h.charAt(0) === "/") h = "https://www.linkedin.com" + h;
+      return h.split("?")[0];
+    }
+  }
+  return "";
+}
+function extractPosts(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const seen = new Set(), out = [];
+  for (const sel of CONTAINERS) {
+    for (const el of doc.querySelectorAll(sel)) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      const url = extractUrl(el);
+      if (!url) continue;
+      out.push({
+        url: url,
+        date_posted: firstText(el, DATES),
+        author: firstText(el, AUTHORS),
+        text: firstText(el, TEXTS),
+      });
+    }
+  }
+  return out;
+}
+
+const form = document.getElementById("form");
+const msg = document.getElementById("msg");
+const go = document.getElementById("go");
+function show(kind, text) { msg.className = "msg " + kind; msg.textContent = text; }
+
+form.addEventListener("submit", async function (e) {
+  e.preventDefault();
+  const term = document.getElementById("term").value.trim();
+  if (!term) { show("error", "Please enter a search term."); return; }
+
+  let html = "";
+  const file = document.getElementById("html_file").files[0];
+  try {
+    if (file) {
+      show("busy", "Reading " + file.name + "…");
+      html = await file.text();
+    }
+    if (!html.trim()) html = document.getElementById("html_text").value;
+    if (!html.trim()) {
+      show("error", "Please choose the saved HTML file, or paste the page source.");
+      return;
+    }
+
+    show("busy", "Finding posts in the page…");
+    const posts = extractPosts(html);
+    if (!posts.length) {
+      show("error", "No posts found in that page. Make sure you saved the " +
+                    "LinkedIn search results (the Posts tab) while logged in.");
+      return;
+    }
+
+    go.disabled = true;
+    show("busy", "Found " + posts.length + " post(s). Building spreadsheet…");
+    const resp = await fetch("/generate-json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ term: term, posts: posts }),
+    });
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.json()).error || ""; } catch (_) {}
+      show("error", detail || ("Server returned " + resp.status + "."));
+      return;
+    }
+    const blob = await resp.blob();
+    const name = resp.headers.get("X-Filename") || "linkedin_posts.xlsx";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+    const unique = new Set(posts.map(function (p) { return p.url; })).size;
+    const dupes = posts.length - unique;
+    show("ok", "Done — " + unique + " post(s) in " + name +
+               (dupes ? " (" + dupes + " duplicate(s) skipped)" : "") + ".");
+  } catch (err) {
+    show("error", "Could not process that file: " + err.message);
+  } finally {
+    go.disabled = false;
+  }
+});
+</script>
 </body>
 </html>
 """
 
 app = Flask(__name__)
-# Keep uploads bounded; serverless request bodies are limited anyway.
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB
+# The JSON path keeps bodies tiny; this only bounds the no-JS upload fallback.
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
 
 def _render(error: str | None = None, term: str = "", status: int = 200):
     return render_template_string(PAGE, error=error, term=term), status
+
+
+def _spreadsheet_response(stored: list[StoredPost], term: str):
+    buffer = BytesIO()
+    build_workbook(stored).save(buffer)
+    buffer.seek(0)
+    filename = f"{_safe_filename(term)}.xlsx"
+    resp = send_file(
+        buffer, mimetype=XLSX_MIME, as_attachment=True, download_name=filename
+    )
+    # Same-origin fetch reads this to name the downloaded file.
+    resp.headers["X-Filename"] = filename
+    return resp
+
+
+def _to_stored(records: list[dict], term: str) -> list[StoredPost]:
+    """Convert extracted records to rows, de-duplicating by post URL."""
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    seen: set[str] = set()
+    stored: list[StoredPost] = []
+    for rec in records:
+        url = str(rec.get("url") or "").strip()[:MAX_FIELD_LEN]
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        stored.append(
+            StoredPost(
+                url=url,
+                date_posted=str(rec.get("date_posted") or "")[:MAX_FIELD_LEN],
+                author=str(rec.get("author") or "")[:MAX_FIELD_LEN],
+                text=str(rec.get("text") or "")[:MAX_TEXT_LEN],
+                search_term=term,
+                captured_at=captured_at,
+            )
+        )
+    return stored
 
 
 @app.get("/")
@@ -136,8 +328,38 @@ def index():
     return _render()
 
 
+@app.post("/generate-json")
+def generate_json():
+    """Build a spreadsheet from rows the page already extracted."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error="Expected a JSON object."), 400
+
+    term = str(payload.get("term") or "").strip()[:MAX_FIELD_LEN]
+    if not term:
+        return jsonify(error="Please enter a search term."), 400
+
+    records = payload.get("posts")
+    if not isinstance(records, list) or not records:
+        return jsonify(error="No posts were sent."), 400
+    if len(records) > MAX_POSTS:
+        return jsonify(error=f"Too many posts (limit {MAX_POSTS})."), 400
+    if not all(isinstance(r, dict) for r in records):
+        return jsonify(error="Each post must be an object."), 400
+
+    stored = _to_stored(records, term)
+    if not stored:
+        return jsonify(error="None of the posts had a usable link."), 400
+    return _spreadsheet_response(stored, term)
+
+
 @app.post("/generate")
 def generate():
+    """No-JavaScript fallback: parse uploaded HTML server-side.
+
+    Subject to the host's request-size limit, so the in-browser path above is
+    the primary route for real saved pages.
+    """
     term = (request.form.get("term") or "").strip()
     if not term:
         return _render(error="Please enter a search term.", status=400)
@@ -145,13 +367,12 @@ def generate():
     html = ""
     upload = request.files.get("html_file")
     if upload is not None and upload.filename:
-        raw = upload.read()
-        html = raw.decode("utf-8", errors="replace")
+        html = upload.read().decode("utf-8", errors="replace")
     if not html.strip():
         html = request.form.get("html_text") or ""
     if not html.strip():
         return _render(
-            error="Please upload the saved HTML file, or paste the page source.",
+            error="Please choose the saved HTML file, or paste the page source.",
             term=term,
             status=400,
         )
@@ -161,45 +382,39 @@ def generate():
         return _render(
             error=(
                 "No posts found in that HTML. Make sure you saved the LinkedIn "
-                "search results page (the Posts tab) while logged in, using "
-                '"Webpage, HTML Only".'
+                "search results page (the Posts tab) while logged in."
             ),
             term=term,
             status=400,
         )
 
-    # De-duplicate by post URL, keeping first occurrence order.
-    captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    seen: set[str] = set()
-    stored: list[StoredPost] = []
-    for post in posts:
-        if post.url in seen:
-            continue
-        seen.add(post.url)
-        stored.append(
-            StoredPost(
-                url=post.url,
-                date_posted=post.date_posted,
-                author=post.author,
-                text=post.text,
-                search_term=term,
-                captured_at=captured_at,
-            )
-        )
+    stored = _to_stored(
+        [
+            {
+                "url": p.url,
+                "date_posted": p.date_posted,
+                "author": p.author,
+                "text": p.text,
+            }
+            for p in posts
+        ],
+        term,
+    )
+    return _spreadsheet_response(stored, term)
 
-    buffer = BytesIO()
-    build_workbook(stored).save(buffer)
-    buffer.seek(0)
-    return send_file(
-        buffer,
-        mimetype=XLSX_MIME,
-        as_attachment=True,
-        download_name=f"{_safe_filename(term)}.xlsx",
+
+@app.errorhandler(413)
+def too_large(_err):
+    return _render(
+        error=(
+            "That file is too large to upload. Enable JavaScript and it will be "
+            "read in your browser instead, with no size limit."
+        ),
+        status=413,
     )
 
 
 def _safe_filename(term: str) -> str:
-    """Turn a search term into a conservative filename stem."""
     keep = [c if c.isalnum() or c in "-_" else "_" for c in term.strip()]
     stem = "".join(keep).strip("_") or "linkedin_posts"
     return f"linkedin_posts_{stem}"[:80]
