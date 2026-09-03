@@ -1,0 +1,15 @@
+# Local datastore and generated spreadsheet (produced per run)
+linkedin_posts.db
+linkedin_posts.xlsx
+*.db
+*.xlsx
+
+# Browser session profile (contains the logged-in LinkedIn session)
+.browser-profile/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

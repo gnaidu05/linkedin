@@ -1,0 +1,8 @@
+{
+  "max_results": 50,
+  "db_path": "linkedin_posts.db",
+  "xlsx_path": "linkedin_posts.xlsx",
+  "user_data_dir": ".browser-profile",
+  "login_timeout_seconds": 300,
+  "scroll_pause_seconds": 2.0
+}
