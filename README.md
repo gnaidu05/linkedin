@@ -70,6 +70,24 @@ Run complete:
 
 Open `linkedin_posts.xlsx` to see the results.
 
+## Or use the web page
+
+If you'd rather work in a browser than a terminal, start the local web page:
+
+```bash
+python web.py
+```
+
+Then open **http://127.0.0.1:5000**. Type a search term, click **Collect**
+(a browser window opens for the manual LinkedIn login, exactly as above), and
+when it finishes the page shows a summary and the collected posts, with a
+**Download Excel** button. It runs against the same datastore as `run.py`, so
+the two entry points share one source of truth.
+
+The web page runs only on your own machine (`127.0.0.1`); it is a convenience
+front end, not a hosted service, and it does not change the LinkedIn login or
+Terms-of-Service realities described above.
+
 ## How re-running works
 
 - The **source of truth** is the local SQLite datastore (`linkedin_posts.db`).
@@ -95,10 +113,12 @@ Edit `config.json`:
 ## Project layout
 
 ```
-run.py                     One-command entry point.
+run.py                     One-command terminal entry point.
+web.py                     Local web-page entry point.
 config.json                Settings.
 linkedin_posts/
   cli.py                   Orchestrates a run: collect -> parse -> store -> excel.
+  webapp.py                Flask web page over the same pipeline.
   collect.py               The only LinkedIn-facing code: drives the browser.
   parse.py                 Pure HTML -> post records (no network; unit-tested).
   store.py                 SQLite datastore; de-dup and incremental append.
@@ -106,6 +126,7 @@ linkedin_posts/
   config.py                Loads config.json.
 tests/
   test_pipeline.py         Parse, store, excel, and full pipeline (on a fixture).
+  test_webapp.py           Web routes (on a fixture; no browser).
   fixtures/sample_search.html
 ```
 

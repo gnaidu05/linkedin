@@ -13,3 +13,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Scratch screenshots
+tmp_page.png
+*.png
